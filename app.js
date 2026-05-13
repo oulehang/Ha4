@@ -1,23 +1,14 @@
 const supabaseUrl = "https://zyfftclxllvzmybltlvh.supabase.co";
 const supabaseKey = "sb_publishable_a72Gllm99-xJgw2Q9TgCWg_XnbG-blN";
 const db = window.supabase.createClient(supabaseUrl, supabaseKey);
+const resumeBucket = "resume-files";
 
-const legacyStorageKey = "job-workbench-v1";
-const migrationFlagKey = "job-workbench-supabase-migrated";
-const state = {
-  resumes: [],
-  jobs: [],
-  questions: []
-};
+const state = { resumes: [], jobs: [], questions: [] };
 const stages = ["待沟通", "已沟通", "约面试", "已结束"];
+let activeResumeId = null;
 
-function $(selector) {
-  return document.querySelector(selector);
-}
-
-function $all(selector) {
-  return [...document.querySelectorAll(selector)];
-}
+const $ = (selector) => document.querySelector(selector);
+const $all = (selector) => [...document.querySelectorAll(selector)];
 
 function setSyncStatus(message, isError = false) {
   const status = $("#syncStatus");
@@ -26,7 +17,7 @@ function setSyncStatus(message, isError = false) {
 }
 
 function escapeHtml(value) {
-  return String(value)
+  return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -38,13 +29,39 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+function sanitizePathPart(value) {
+  return String(value).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-");
+}
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+function publicFileUrl(path) {
+  if (!path) return "";
+  return db.storage.from(resumeBucket).getPublicUrl(path).data.publicUrl;
+}
+
 function mapResume(row) {
+  const kind = row.resume_kind || (row.storage_path ? "pdf" : row.markdown_content ? "markdown" : "structured");
   return {
     id: row.id,
     name: row.name,
     role: row.role,
     status: row.status,
-    highlights: row.highlights
+    highlights: row.highlights || "",
+    kind,
+    markdown: row.markdown_content || "",
+    fileName: row.file_name || "",
+    fileMime: row.file_mime || "",
+    storagePath: row.storage_path || "",
+    fileSize: row.file_size || 0,
+    fileUrl: publicFileUrl(row.storage_path)
   };
 }
 
@@ -69,14 +86,6 @@ function mapQuestion(row) {
   };
 }
 
-function readLegacyState() {
-  try {
-    return JSON.parse(localStorage.getItem(legacyStorageKey)) || {};
-  } catch {
-    return {};
-  }
-}
-
 function handleDbError(error, fallbackMessage) {
   if (!error) return;
   setSyncStatus(`${fallbackMessage}: ${error.message}`, true);
@@ -98,59 +107,8 @@ async function loadData() {
   state.resumes = resumes.data.map(mapResume);
   state.jobs = jobs.data.map(mapJob);
   state.questions = questions.data.map(mapQuestion);
-
-  await migrateLegacyDataIfNeeded();
   renderAll();
   setSyncStatus("已连接 Supabase，数据会自动保存到云端。");
-}
-
-async function migrateLegacyDataIfNeeded() {
-  if (localStorage.getItem(migrationFlagKey)) return;
-  const legacy = readLegacyState();
-  const hasLegacy = legacy.resumes?.length || legacy.jobs?.length || legacy.questions?.length;
-  const hasRemote = state.resumes.length || state.jobs.length || state.questions.length;
-  if (!hasLegacy || hasRemote) {
-    localStorage.setItem(migrationFlagKey, "true");
-    return;
-  }
-
-  setSyncStatus("正在迁移本地历史数据到 Supabase...");
-  if (legacy.resumes?.length) {
-    const { data, error } = await db
-      .from("job_resumes")
-      .insert(legacy.resumes.map(({ name, role, status, highlights }) => ({ name, role, status, highlights })))
-      .select("*");
-    handleDbError(error, "简历迁移失败");
-    state.resumes = data.map(mapResume);
-  }
-
-  if (legacy.jobs?.length) {
-    const { data, error } = await db
-      .from("boss_jobs")
-      .insert(
-        legacy.jobs.map(({ company, position, stage, date, note }) => ({
-          company,
-          position,
-          stage,
-          follow_up_date: date,
-          note
-        }))
-      )
-      .select("*");
-    handleDbError(error, "岗位迁移失败");
-    state.jobs = data.map(mapJob);
-  }
-
-  if (legacy.questions?.length) {
-    const { data, error } = await db
-      .from("interview_questions")
-      .insert(legacy.questions.map(({ topic, tag, level, answer }) => ({ topic, tag, level, answer })))
-      .select("*");
-    handleDbError(error, "面试题迁移失败");
-    state.questions = data.map(mapQuestion);
-  }
-
-  localStorage.setItem(migrationFlagKey, "true");
 }
 
 function setView(viewId) {
@@ -186,11 +144,7 @@ function renderOverview() {
   $("#urgentJobs").innerHTML = urgent.length
     ? urgent
         .map(
-          (job) => `
-          <article class="item">
-            <strong>${escapeHtml(job.company)} · ${escapeHtml(job.position)}</strong>
-            <span class="meta">${escapeHtml(job.stage)} · ${escapeHtml(job.date)}</span>
-          </article>`
+          (job) => `<article class="item"><strong>${escapeHtml(job.company)} · ${escapeHtml(job.position)}</strong><span class="meta">${escapeHtml(job.stage)} · ${escapeHtml(job.date)}</span></article>`
         )
         .join("")
     : `<div class="empty">还没有需要跟进的岗位。</div>`;
@@ -199,11 +153,7 @@ function renderOverview() {
   $("#recentQuestions").innerHTML = recent.length
     ? recent
         .map(
-          (question) => `
-          <article class="item">
-            <strong>${escapeHtml(question.topic)}</strong>
-            <span class="meta">${escapeHtml(question.tag)} · ${escapeHtml(question.level)}</span>
-          </article>`
+          (question) => `<article class="item"><strong>${escapeHtml(question.topic)}</strong><span class="meta">${escapeHtml(question.tag)} · ${escapeHtml(question.level)}</span></article>`
         )
         .join("")
     : `<div class="empty">记录第一道面试题后会显示在这里。</div>`;
@@ -212,18 +162,58 @@ function renderOverview() {
 function renderResumes() {
   $("#resumeRows").innerHTML = state.resumes.length
     ? state.resumes
-        .map(
-          (resume) => `
-          <tr>
-            <td><strong>${escapeHtml(resume.name)}</strong></td>
+        .map((resume) => {
+          const typeText = { structured: "结构化", markdown: "Markdown", pdf: "PDF" }[resume.kind] || "结构化";
+          return `
+          <tr class="${resume.id === activeResumeId ? "selected-row" : ""}">
+            <td><strong>${escapeHtml(resume.name)}</strong><div class="meta">${escapeHtml(resume.fileName)}</div></td>
+            <td><span class="tag">${typeText}</span></td>
             <td>${escapeHtml(resume.role)}</td>
             <td><span class="tag">${escapeHtml(resume.status)}</span></td>
             <td>${escapeHtml(resume.highlights)}</td>
-            <td><button class="delete" data-delete-resume="${resume.id}" aria-label="删除简历版本">×</button></td>
-          </tr>`
-        )
+            <td class="row-actions">
+              <button class="secondary small" data-preview-resume="${resume.id}">预览</button>
+              <button class="delete" data-delete-resume="${resume.id}" aria-label="删除简历版本">×</button>
+            </td>
+          </tr>`;
+        })
         .join("")
-    : `<tr><td colspan="5"><div class="empty">暂无简历版本，先保存一个主推版本。</div></td></tr>`;
+    : `<tr><td colspan="6"><div class="empty">暂无简历版本，先保存一个主推版本或上传 Markdown/PDF。</div></td></tr>`;
+}
+
+function renderMarkdownPreview(markdown) {
+  const html = window.marked ? window.marked.parse(markdown || "") : `<pre>${escapeHtml(markdown)}</pre>`;
+  return `<article class="markdown-body">${html}</article>`;
+}
+
+function renderResumePreview(id) {
+  const resume = state.resumes.find((item) => item.id === id);
+  if (!resume) return;
+  activeResumeId = id;
+  $("#previewTitle").textContent = resume.name;
+  $("#markdownEditor").hidden = resume.kind !== "markdown";
+  $("#saveMarkdown").hidden = resume.kind !== "markdown";
+  $("#exportMarkdownPdf").hidden = resume.kind !== "markdown";
+
+  if (resume.kind === "markdown") {
+    $("#markdownEditor").value = resume.markdown;
+    $("#resumePreview").classList.remove("empty");
+    $("#resumePreview").innerHTML = renderMarkdownPreview(resume.markdown);
+  } else if (resume.kind === "pdf") {
+    $("#resumePreview").classList.remove("empty");
+    $("#resumePreview").innerHTML = `<iframe class="pdf-frame" src="${resume.fileUrl}" title="${escapeHtml(resume.name)}"></iframe>`;
+  } else {
+    $("#resumePreview").classList.remove("empty");
+    $("#resumePreview").innerHTML = `
+      <article class="markdown-body">
+        <h1>${escapeHtml(resume.name)}</h1>
+        <p><strong>目标岗位：</strong>${escapeHtml(resume.role)}</p>
+        <p><strong>状态：</strong>${escapeHtml(resume.status)}</p>
+        <h2>核心亮点</h2>
+        <p>${escapeHtml(resume.highlights)}</p>
+      </article>`;
+  }
+  renderResumes();
 }
 
 function renderJobs() {
@@ -272,13 +262,8 @@ function renderQuestions() {
           (question) => `
           <article class="question-card">
             <header>
-              <div>
-                <h3>${escapeHtml(question.topic)}</h3>
-                <span class="meta">${escapeHtml(question.tag)}</span>
-              </div>
-              <span class="tag ${question.level === "高频重点" ? "hot" : question.level === "待复盘" ? "warn" : ""}">
-                ${escapeHtml(question.level)}
-              </span>
+              <div><h3>${escapeHtml(question.topic)}</h3><span class="meta">${escapeHtml(question.tag)}</span></div>
+              <span class="tag ${question.level === "高频重点" ? "hot" : question.level === "待复盘" ? "warn" : ""}">${escapeHtml(question.level)}</span>
             </header>
             <p>${escapeHtml(question.answer)}</p>
             <button class="delete" data-delete-question="${question.id}" aria-label="删除面试题">×</button>
@@ -308,50 +293,33 @@ async function seedDemoData() {
           name: "Java 后端-支付系统版",
           role: "Java 后端开发工程师",
           status: "主推版本",
-          highlights: "突出高并发支付链路、Redis 缓存、MQ 解耦和线上问题排查。"
+          highlights: "突出高并发支付链路、Redis 缓存、MQ 解耦和线上问题排查。",
+          resume_kind: "structured"
         },
         {
-          name: "数据平台-ETL 版",
-          role: "数据开发工程师",
+          name: "Markdown 简历模板",
+          role: "后端开发工程师",
           status: "准备中",
-          highlights: "强调调度、数据质量、血缘追踪和稳定性治理。"
+          highlights: "可在线编辑并导出 PDF。",
+          resume_kind: "markdown",
+          file_name: "backend-resume.md",
+          file_mime: "text/markdown",
+          markdown_content: "# 张三\n\n## 目标岗位\n后端开发工程师\n\n## 项目经历\n- 负责支付系统核心链路优化，接口 P95 延迟下降 35%。\n- 使用 Redis、MQ 和 MySQL 完成高并发订单处理。\n\n## 技能\nJava / Spring Boot / MySQL / Redis / Kafka"
         }
       ])
       .select("*"),
     db
       .from("boss_jobs")
       .insert([
-        {
-          company: "星河科技",
-          position: "Java 中级开发",
-          stage: "待沟通",
-          follow_up_date: today,
-          note: "JD 关注 Spring Cloud、MySQL 优化、分布式事务。"
-        },
-        {
-          company: "云启数据",
-          position: "数据平台工程师",
-          stage: "约面试",
-          follow_up_date: interviewDay,
-          note: "准备项目架构图和数据质量治理案例。"
-        }
+        { company: "星河科技", position: "Java 中级开发", stage: "待沟通", follow_up_date: today, note: "JD 关注 Spring Cloud、MySQL 优化、分布式事务。" },
+        { company: "云启数据", position: "数据平台工程师", stage: "约面试", follow_up_date: interviewDay, note: "准备项目架构图和数据质量治理案例。" }
       ])
       .select("*"),
     db
       .from("interview_questions")
       .insert([
-        {
-          topic: "Redis 缓存击穿、穿透、雪崩分别怎么处理？",
-          tag: "Redis",
-          level: "高频重点",
-          answer: "击穿用互斥锁或逻辑过期，穿透用布隆过滤器和空值缓存，雪崩用过期时间打散与多级缓存。"
-        },
-        {
-          topic: "一次线上慢 SQL 排查过程怎么讲？",
-          tag: "项目复盘",
-          level: "待复盘",
-          answer: "按现象、定位、执行计划、索引调整、验证指标、复盘预防的结构回答。"
-        }
+        { topic: "Redis 缓存击穿、穿透、雪崩分别怎么处理？", tag: "Redis", level: "高频重点", answer: "击穿用互斥锁或逻辑过期，穿透用布隆过滤器和空值缓存，雪崩用过期时间打散与多级缓存。" },
+        { topic: "一次线上慢 SQL 排查过程怎么讲？", tag: "项目复盘", level: "待复盘", answer: "按现象、定位、执行计划、索引调整、验证指标、复盘预防的结构回答。" }
       ])
       .select("*")
   ]);
@@ -359,7 +327,6 @@ async function seedDemoData() {
   handleDbError(resumes.error, "示例简历写入失败");
   handleDbError(jobs.error, "示例岗位写入失败");
   handleDbError(questions.error, "示例题目写入失败");
-
   state.resumes.push(...resumes.data.map(mapResume));
   state.jobs.push(...jobs.data.map(mapJob));
   state.questions.push(...questions.data.map(mapQuestion));
@@ -374,12 +341,106 @@ $("#resumeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   setSyncStatus("正在保存简历...");
   const payload = formData(event.currentTarget);
-  const { data, error } = await db.from("job_resumes").insert(payload).select("*").single();
+  const { data, error } = await db
+    .from("job_resumes")
+    .insert({ ...payload, resume_kind: "structured" })
+    .select("*")
+    .single();
   handleDbError(error, "简历保存失败");
   state.resumes.push(mapResume(data));
   event.currentTarget.reset();
   renderAll();
   setSyncStatus("简历已保存到 Supabase。");
+});
+
+$("#resumeFileForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = formData(form);
+  const file = payload.file;
+  const isMarkdown = /\.m(ark)?d$/i.test(file.name) || file.type === "text/markdown";
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+
+  if (!isMarkdown && !isPdf) {
+    setSyncStatus("只支持上传 .md、.markdown 或 .pdf 文件。", true);
+    return;
+  }
+
+  setSyncStatus("正在上传简历文件...");
+  let rowPayload = {
+    name: payload.name,
+    role: payload.role,
+    status: payload.status,
+    highlights: payload.highlights || "",
+    file_name: file.name,
+    file_mime: isMarkdown ? "text/markdown" : "application/pdf",
+    file_size: file.size,
+    resume_kind: isMarkdown ? "markdown" : "pdf"
+  };
+
+  if (isMarkdown) {
+    rowPayload.markdown_content = await readTextFile(file);
+  } else {
+    const storagePath = `pdf/${Date.now()}-${sanitizePathPart(file.name)}`;
+    const upload = await db.storage.from(resumeBucket).upload(storagePath, file, {
+      contentType: "application/pdf",
+      upsert: false
+    });
+    handleDbError(upload.error, "PDF 上传失败");
+    rowPayload.storage_path = storagePath;
+  }
+
+  const { data, error } = await db.from("job_resumes").insert(rowPayload).select("*").single();
+  handleDbError(error, "文件简历保存失败");
+  const resume = mapResume(data);
+  state.resumes.push(resume);
+  form.reset();
+  renderAll();
+  renderResumePreview(resume.id);
+  setSyncStatus("简历文件已保存到 Supabase。");
+});
+
+$("#markdownEditor").addEventListener("input", () => {
+  const resume = state.resumes.find((item) => item.id === activeResumeId);
+  if (!resume || resume.kind !== "markdown") return;
+  resume.markdown = $("#markdownEditor").value;
+  $("#resumePreview").innerHTML = renderMarkdownPreview(resume.markdown);
+});
+
+$("#saveMarkdown").addEventListener("click", async () => {
+  const resume = state.resumes.find((item) => item.id === activeResumeId);
+  if (!resume || resume.kind !== "markdown") return;
+  setSyncStatus("正在保存 Markdown...");
+  const { data, error } = await db
+    .from("job_resumes")
+    .update({ markdown_content: $("#markdownEditor").value })
+    .eq("id", resume.id)
+    .select("*")
+    .single();
+  handleDbError(error, "Markdown 保存失败");
+  Object.assign(resume, mapResume(data));
+  renderResumePreview(resume.id);
+  setSyncStatus("Markdown 已保存到 Supabase。");
+});
+
+$("#exportMarkdownPdf").addEventListener("click", () => {
+  const resume = state.resumes.find((item) => item.id === activeResumeId);
+  if (!resume || resume.kind !== "markdown") return;
+  const source = document.createElement("div");
+  source.className = "markdown-body pdf-export";
+  source.innerHTML = window.marked.parse($("#markdownEditor").value || "");
+  document.body.appendChild(source);
+  window
+    .html2pdf()
+    .set({
+      margin: 12,
+      filename: `${sanitizePathPart(resume.name || "resume")}.pdf`,
+      html2canvas: { scale: 2, useCORS: true },
+      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }
+    })
+    .from(source)
+    .save()
+    .finally(() => source.remove());
 });
 
 $("#jobForm").addEventListener("submit", async (event) => {
@@ -388,13 +449,7 @@ $("#jobForm").addEventListener("submit", async (event) => {
   const payload = formData(event.currentTarget);
   const { data, error } = await db
     .from("boss_jobs")
-    .insert({
-      company: payload.company,
-      position: payload.position,
-      stage: payload.stage,
-      follow_up_date: payload.date,
-      note: payload.note
-    })
+    .insert({ company: payload.company, position: payload.position, stage: payload.stage, follow_up_date: payload.date, note: payload.note })
     .select("*")
     .single();
   handleDbError(error, "岗位保存失败");
@@ -425,15 +480,29 @@ $("#makeScript").addEventListener("click", () => {
 });
 
 document.addEventListener("click", async (event) => {
+  const previewId = event.target.dataset.previewResume;
   const resumeId = event.target.dataset.deleteResume;
   const jobId = event.target.dataset.deleteJob;
   const questionId = event.target.dataset.deleteQuestion;
 
+  if (previewId) renderResumePreview(previewId);
+
   if (resumeId) {
     setSyncStatus("正在删除简历...");
+    const resume = state.resumes.find((item) => item.id === resumeId);
     const { error } = await db.from("job_resumes").delete().eq("id", resumeId);
     handleDbError(error, "简历删除失败");
+    if (resume?.storagePath) await db.storage.from(resumeBucket).remove([resume.storagePath]);
     state.resumes = state.resumes.filter((item) => item.id !== resumeId);
+    if (activeResumeId === resumeId) {
+      activeResumeId = null;
+      $("#previewTitle").textContent = "选择一份简历预览";
+      $("#markdownEditor").hidden = true;
+      $("#saveMarkdown").hidden = true;
+      $("#exportMarkdownPdf").hidden = true;
+      $("#resumePreview").className = "resume-preview empty";
+      $("#resumePreview").textContent = "从左侧列表选择简历。Markdown 支持在线编辑和导出 PDF，PDF 支持在线预览。";
+    }
   }
 
   if (jobId) {

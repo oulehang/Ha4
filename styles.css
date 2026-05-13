@@ -318,6 +318,14 @@ button {
   resize: vertical;
 }
 
+.form-grid.stacked {
+  grid-template-columns: 1fr;
+}
+
+.form-grid.stacked textarea {
+  grid-column: auto;
+}
+
 input,
 select,
 textarea {
@@ -388,6 +396,138 @@ tr:last-child td {
   border-radius: 8px;
   min-width: 36px;
   min-height: 34px;
+}
+
+.small {
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.selected-row {
+  background: #f4fbf9;
+}
+
+.resume-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.resume-workspace {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(420px, 1.05fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.preview-panel {
+  min-height: 720px;
+}
+
+.preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.preview-head p {
+  margin: 0 0 6px;
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.markdown-editor {
+  min-height: 220px;
+  margin-bottom: 12px;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  line-height: 1.55;
+}
+
+.resume-preview {
+  min-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  overflow: auto;
+}
+
+.resume-preview.empty {
+  padding: 18px;
+  color: var(--muted);
+  background: #f8faf8;
+}
+
+.pdf-frame {
+  width: 100%;
+  height: 680px;
+  border: 0;
+  display: block;
+}
+
+.markdown-body {
+  padding: 28px;
+  color: var(--ink);
+  line-height: 1.72;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  line-height: 1.25;
+}
+
+.markdown-body h1 {
+  margin-top: 0;
+  font-size: 30px;
+}
+
+.markdown-body h2 {
+  margin-top: 28px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 21px;
+}
+
+.markdown-body code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #eef3ef;
+}
+
+.markdown-body pre {
+  padding: 14px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #182124;
+  color: #f6fbf9;
+}
+
+.pdf-export {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 760px;
+  background: #fff;
 }
 
 .tool-row {
@@ -487,8 +627,14 @@ tr:last-child td {
   .hero,
   .overview-grid,
   .tool-row,
-  .question-list {
+  .question-list,
+  .resume-layout,
+  .resume-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .preview-panel {
+    min-height: auto;
   }
 
   .stats {
