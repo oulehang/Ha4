@@ -1,28 +1,15 @@
-const storageKey = "job-workbench-v1";
-const defaultState = {
+const supabaseUrl = "https://zyfftclxllvzmybltlvh.supabase.co";
+const supabaseKey = "sb_publishable_a72Gllm99-xJgw2Q9TgCWg_XnbG-blN";
+const db = window.supabase.createClient(supabaseUrl, supabaseKey);
+
+const legacyStorageKey = "job-workbench-v1";
+const migrationFlagKey = "job-workbench-supabase-migrated";
+const state = {
   resumes: [],
   jobs: [],
   questions: []
 };
-
-const state = loadState();
 const stages = ["待沟通", "已沟通", "约面试", "已结束"];
-
-function loadState() {
-  try {
-    return { ...defaultState, ...JSON.parse(localStorage.getItem(storageKey)) };
-  } catch {
-    return structuredClone(defaultState);
-  }
-}
-
-function saveState() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
-}
-
-function uid() {
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
 
 function $(selector) {
   return document.querySelector(selector);
@@ -30,6 +17,12 @@ function $(selector) {
 
 function $all(selector) {
   return [...document.querySelectorAll(selector)];
+}
+
+function setSyncStatus(message, isError = false) {
+  const status = $("#syncStatus");
+  status.textContent = message;
+  status.classList.toggle("error", isError);
 }
 
 function escapeHtml(value) {
@@ -43,6 +36,121 @@ function escapeHtml(value) {
 
 function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
+}
+
+function mapResume(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role,
+    status: row.status,
+    highlights: row.highlights
+  };
+}
+
+function mapJob(row) {
+  return {
+    id: row.id,
+    company: row.company,
+    position: row.position,
+    stage: row.stage,
+    date: row.follow_up_date,
+    note: row.note
+  };
+}
+
+function mapQuestion(row) {
+  return {
+    id: row.id,
+    topic: row.topic,
+    tag: row.tag,
+    level: row.level,
+    answer: row.answer
+  };
+}
+
+function readLegacyState() {
+  try {
+    return JSON.parse(localStorage.getItem(legacyStorageKey)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function handleDbError(error, fallbackMessage) {
+  if (!error) return;
+  setSyncStatus(`${fallbackMessage}: ${error.message}`, true);
+  throw error;
+}
+
+async function loadData() {
+  setSyncStatus("正在从 Supabase 加载数据...");
+  const [resumes, jobs, questions] = await Promise.all([
+    db.from("job_resumes").select("*").order("created_at", { ascending: true }),
+    db.from("boss_jobs").select("*").order("created_at", { ascending: true }),
+    db.from("interview_questions").select("*").order("created_at", { ascending: true })
+  ]);
+
+  handleDbError(resumes.error, "简历加载失败");
+  handleDbError(jobs.error, "岗位加载失败");
+  handleDbError(questions.error, "面试题加载失败");
+
+  state.resumes = resumes.data.map(mapResume);
+  state.jobs = jobs.data.map(mapJob);
+  state.questions = questions.data.map(mapQuestion);
+
+  await migrateLegacyDataIfNeeded();
+  renderAll();
+  setSyncStatus("已连接 Supabase，数据会自动保存到云端。");
+}
+
+async function migrateLegacyDataIfNeeded() {
+  if (localStorage.getItem(migrationFlagKey)) return;
+  const legacy = readLegacyState();
+  const hasLegacy = legacy.resumes?.length || legacy.jobs?.length || legacy.questions?.length;
+  const hasRemote = state.resumes.length || state.jobs.length || state.questions.length;
+  if (!hasLegacy || hasRemote) {
+    localStorage.setItem(migrationFlagKey, "true");
+    return;
+  }
+
+  setSyncStatus("正在迁移本地历史数据到 Supabase...");
+  if (legacy.resumes?.length) {
+    const { data, error } = await db
+      .from("job_resumes")
+      .insert(legacy.resumes.map(({ name, role, status, highlights }) => ({ name, role, status, highlights })))
+      .select("*");
+    handleDbError(error, "简历迁移失败");
+    state.resumes = data.map(mapResume);
+  }
+
+  if (legacy.jobs?.length) {
+    const { data, error } = await db
+      .from("boss_jobs")
+      .insert(
+        legacy.jobs.map(({ company, position, stage, date, note }) => ({
+          company,
+          position,
+          stage,
+          follow_up_date: date,
+          note
+        }))
+      )
+      .select("*");
+    handleDbError(error, "岗位迁移失败");
+    state.jobs = data.map(mapJob);
+  }
+
+  if (legacy.questions?.length) {
+    const { data, error } = await db
+      .from("interview_questions")
+      .insert(legacy.questions.map(({ topic, tag, level, answer }) => ({ topic, tag, level, answer })))
+      .select("*");
+    handleDbError(error, "面试题迁移失败");
+    state.questions = data.map(mapQuestion);
+  }
+
+  localStorage.setItem(migrationFlagKey, "true");
 }
 
 function setView(viewId) {
@@ -188,86 +296,124 @@ function renderAll() {
   renderQuestions();
 }
 
-function seedDemoData() {
-  state.resumes = [
-    {
-      id: uid(),
-      name: "Java 后端-支付系统版",
-      role: "Java 后端开发工程师",
-      status: "主推版本",
-      highlights: "突出高并发支付链路、Redis 缓存、MQ 解耦和线上问题排查。"
-    },
-    {
-      id: uid(),
-      name: "数据平台-ETL 版",
-      role: "数据开发工程师",
-      status: "准备中",
-      highlights: "强调调度、数据质量、血缘追踪和稳定性治理。"
-    }
-  ];
-  state.jobs = [
-    {
-      id: uid(),
-      company: "星河科技",
-      position: "Java 中级开发",
-      stage: "待沟通",
-      date: new Date().toISOString().slice(0, 10),
-      note: "JD 关注 Spring Cloud、MySQL 优化、分布式事务。"
-    },
-    {
-      id: uid(),
-      company: "云启数据",
-      position: "数据平台工程师",
-      stage: "约面试",
-      date: new Date(Date.now() + 86400000 * 3).toISOString().slice(0, 10),
-      note: "准备项目架构图和数据质量治理案例。"
-    }
-  ];
-  state.questions = [
-    {
-      id: uid(),
-      topic: "Redis 缓存击穿、穿透、雪崩分别怎么处理？",
-      tag: "Redis",
-      level: "高频重点",
-      answer: "击穿用互斥锁或逻辑过期，穿透用布隆过滤器和空值缓存，雪崩用过期时间打散与多级缓存。"
-    },
-    {
-      id: uid(),
-      topic: "一次线上慢 SQL 排查过程怎么讲？",
-      tag: "项目复盘",
-      level: "待复盘",
-      answer: "按现象、定位、执行计划、索引调整、验证指标、复盘预防的结构回答。"
-    }
-  ];
-  saveState();
+async function seedDemoData() {
+  setSyncStatus("正在写入示例数据...");
+  const today = new Date().toISOString().slice(0, 10);
+  const interviewDay = new Date(Date.now() + 86400000 * 3).toISOString().slice(0, 10);
+  const [resumes, jobs, questions] = await Promise.all([
+    db
+      .from("job_resumes")
+      .insert([
+        {
+          name: "Java 后端-支付系统版",
+          role: "Java 后端开发工程师",
+          status: "主推版本",
+          highlights: "突出高并发支付链路、Redis 缓存、MQ 解耦和线上问题排查。"
+        },
+        {
+          name: "数据平台-ETL 版",
+          role: "数据开发工程师",
+          status: "准备中",
+          highlights: "强调调度、数据质量、血缘追踪和稳定性治理。"
+        }
+      ])
+      .select("*"),
+    db
+      .from("boss_jobs")
+      .insert([
+        {
+          company: "星河科技",
+          position: "Java 中级开发",
+          stage: "待沟通",
+          follow_up_date: today,
+          note: "JD 关注 Spring Cloud、MySQL 优化、分布式事务。"
+        },
+        {
+          company: "云启数据",
+          position: "数据平台工程师",
+          stage: "约面试",
+          follow_up_date: interviewDay,
+          note: "准备项目架构图和数据质量治理案例。"
+        }
+      ])
+      .select("*"),
+    db
+      .from("interview_questions")
+      .insert([
+        {
+          topic: "Redis 缓存击穿、穿透、雪崩分别怎么处理？",
+          tag: "Redis",
+          level: "高频重点",
+          answer: "击穿用互斥锁或逻辑过期，穿透用布隆过滤器和空值缓存，雪崩用过期时间打散与多级缓存。"
+        },
+        {
+          topic: "一次线上慢 SQL 排查过程怎么讲？",
+          tag: "项目复盘",
+          level: "待复盘",
+          answer: "按现象、定位、执行计划、索引调整、验证指标、复盘预防的结构回答。"
+        }
+      ])
+      .select("*")
+  ]);
+
+  handleDbError(resumes.error, "示例简历写入失败");
+  handleDbError(jobs.error, "示例岗位写入失败");
+  handleDbError(questions.error, "示例题目写入失败");
+
+  state.resumes.push(...resumes.data.map(mapResume));
+  state.jobs.push(...jobs.data.map(mapJob));
+  state.questions.push(...questions.data.map(mapQuestion));
   renderAll();
+  setSyncStatus("示例数据已保存到 Supabase。");
 }
 
 $all(".nav-item").forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
 $all("[data-jump]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.jump)));
 
-$("#resumeForm").addEventListener("submit", (event) => {
+$("#resumeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  state.resumes.push({ id: uid(), ...formData(event.currentTarget) });
+  setSyncStatus("正在保存简历...");
+  const payload = formData(event.currentTarget);
+  const { data, error } = await db.from("job_resumes").insert(payload).select("*").single();
+  handleDbError(error, "简历保存失败");
+  state.resumes.push(mapResume(data));
   event.currentTarget.reset();
-  saveState();
   renderAll();
+  setSyncStatus("简历已保存到 Supabase。");
 });
 
-$("#jobForm").addEventListener("submit", (event) => {
+$("#jobForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  state.jobs.push({ id: uid(), ...formData(event.currentTarget) });
+  setSyncStatus("正在保存岗位...");
+  const payload = formData(event.currentTarget);
+  const { data, error } = await db
+    .from("boss_jobs")
+    .insert({
+      company: payload.company,
+      position: payload.position,
+      stage: payload.stage,
+      follow_up_date: payload.date,
+      note: payload.note
+    })
+    .select("*")
+    .single();
+  handleDbError(error, "岗位保存失败");
+  state.jobs.push(mapJob(data));
   event.currentTarget.reset();
-  saveState();
   renderAll();
+  setSyncStatus("岗位已保存到 Supabase。");
 });
 
-$("#questionForm").addEventListener("submit", (event) => {
+$("#questionForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  state.questions.push({ id: uid(), ...formData(event.currentTarget) });
+  setSyncStatus("正在保存面试题...");
+  const payload = formData(event.currentTarget);
+  const { data, error } = await db.from("interview_questions").insert(payload).select("*").single();
+  handleDbError(error, "面试题保存失败");
+  state.questions.push(mapQuestion(data));
   event.currentTarget.reset();
-  saveState();
   renderAll();
+  setSyncStatus("面试题已保存到 Supabase。");
 });
 
 $("#jobFilter").addEventListener("change", renderJobs);
@@ -278,18 +424,39 @@ $("#makeScript").addEventListener("click", () => {
   $("#scriptOutput").textContent = `您好，我关注到这个岗位重点需要 ${keywords}。我最近的项目经历和这些方向比较匹配，尤其在业务落地、问题排查和性能优化上有完整经验。方便的话，我想进一步了解团队当前最看重的能力和面试安排。`;
 });
 
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const resumeId = event.target.dataset.deleteResume;
   const jobId = event.target.dataset.deleteJob;
   const questionId = event.target.dataset.deleteQuestion;
 
-  if (resumeId) state.resumes = state.resumes.filter((item) => item.id !== resumeId);
-  if (jobId) state.jobs = state.jobs.filter((item) => item.id !== jobId);
-  if (questionId) state.questions = state.questions.filter((item) => item.id !== questionId);
+  if (resumeId) {
+    setSyncStatus("正在删除简历...");
+    const { error } = await db.from("job_resumes").delete().eq("id", resumeId);
+    handleDbError(error, "简历删除失败");
+    state.resumes = state.resumes.filter((item) => item.id !== resumeId);
+  }
+
+  if (jobId) {
+    setSyncStatus("正在删除岗位...");
+    const { error } = await db.from("boss_jobs").delete().eq("id", jobId);
+    handleDbError(error, "岗位删除失败");
+    state.jobs = state.jobs.filter((item) => item.id !== jobId);
+  }
+
+  if (questionId) {
+    setSyncStatus("正在删除面试题...");
+    const { error } = await db.from("interview_questions").delete().eq("id", questionId);
+    handleDbError(error, "面试题删除失败");
+    state.questions = state.questions.filter((item) => item.id !== questionId);
+  }
+
   if (resumeId || jobId || questionId) {
-    saveState();
     renderAll();
+    setSyncStatus("删除已同步到 Supabase。");
   }
 });
 
-renderAll();
+loadData().catch((error) => {
+  console.error(error);
+  renderAll();
+});

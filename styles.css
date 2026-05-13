@@ -198,6 +198,16 @@ button {
   margin: 18px 0;
 }
 
+.sync-status {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sync-status.error {
+  color: #9a3425;
+}
+
 .stats div,
 .panel,
 .table-wrap {
